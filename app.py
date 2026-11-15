@@ -46,8 +46,9 @@ def too_large(error):
 @app.post("/api/imagen")
 def process_image():
     upload = request.files.get("imagen")
-    if not upload or not upload.filename:
-        return jsonify(error="Selecciona una imagen PNG o JPEG."), 400
+    demo = request.form.get("demo")
+    if (not upload or not upload.filename) and demo not in DEMO_FILES:
+        return jsonify(error="Selecciona una imagen PNG o JPEG o un personaje."), 400
     try:
         name = request.form.get("filtro", "grises")
         if name not in FILTERS:
@@ -55,19 +56,24 @@ def process_image():
         threshold = int(request.form.get("umbral", 128))
         if not 0 <= threshold <= 255:
             raise ValueError("El umbral debe estar entre 0 y 255.")
-        raw = upload.read(8 * 1024 * 1024 + 1)
-        if len(raw) > 8 * 1024 * 1024:
-            raise ValueError("La imagen debe pesar como máximo 8 MB.")
-        with warnings.catch_warnings():
-            warnings.simplefilter("error", Image.DecompressionBombWarning)
-            with Image.open(io.BytesIO(raw)) as source:
-                if source.format not in ("PNG", "JPEG"):
-                    raise ValueError("Solo se admiten imágenes PNG o JPEG.")
-                width, height = source.size
-                if width * height > 8_000_000:
-                    raise ValueError("La imagen debe tener como máximo 8 megapíxeles.")
-                rgb = np.array(source.convert("RGB"))
-        image = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+        if demo in DEMO_FILES and (not upload or not upload.filename):
+            image = load_demo(demo)
+            height, width = image.shape[:2]
+        else:
+            raw = upload.read(8 * 1024 * 1024 + 1)
+            if len(raw) > 8 * 1024 * 1024:
+                raise ValueError("La imagen debe pesar como máximo 8 MB.")
+            with warnings.catch_warnings():
+                warnings.simplefilter("error", Image.DecompressionBombWarning)
+                with Image.open(io.BytesIO(raw)) as source:
+                    if source.format not in ("PNG", "JPEG"):
+                        raise ValueError("Solo se admiten imágenes PNG o JPEG.")
+                    width, height = source.size
+                    if width * height > 8_000_000:
+                        raise ValueError("La imagen debe tener como máximo 8 megapíxeles.")
+                    rgba = source.convert("RGBA")
+                    rgb = np.array(Image.alpha_composite(Image.new("RGBA", rgba.size, (255, 255, 255, 255)), rgba).convert("RGB"))
+            image = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
         result = apply_filter(image, name, threshold)
         gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
         histogram = np.histogram(gray, bins=16, range=(0, 256))[0].tolist()
@@ -119,6 +125,50 @@ def calculate():
         return jsonify(resultado=value)
     except (KeyError, ValueError, TypeError, OverflowError):
         return jsonify(error="Ingresa dos números finitos y una operación válida."), 400
+
+
+# Guía interactiva: operaciones concretas de las celdas del cuaderno.
+DEMO_FILES = {"asta": "asta-action.png", "yuno": "yuno.png", "noelle": "noelle.png"}
+
+def load_demo(name):
+    from pathlib import Path
+    if name not in DEMO_FILES:
+        raise ValueError("Personaje no válido.")
+    path = Path(app.root_path) / "static" / "images" / DEMO_FILES[name]
+    with Image.open(path) as source:
+        rgba = source.convert("RGBA")
+        rgb = Image.alpha_composite(Image.new("RGBA", rgba.size, (255, 255, 255, 255)), rgba).convert("RGB")
+        return cv2.cvtColor(np.array(rgb), cv2.COLOR_RGB2BGR)
+
+@app.get("/cuaderno.ipynb")
+def download_notebook():
+    from flask import send_from_directory
+    return send_from_directory("notebooks", "mi_grimorio.ipynb", as_attachment=True)
+
+@app.post("/api/cuaderno")
+def notebook_cell():
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify(error="Envía los parámetros de la celda."), 400
+    cell = data.get("celda")
+    if cell == "fundamentos":
+        brillos = [20, 100, 160, 250]
+        foto = {"nombre": "Asta", "ancho": 900, "alto": 560}
+        lines = [f"{pixel} {'CLARO' if pixel >= 128 else 'OSCURO'}" for pixel in brillos]
+        lines.append(f"{foto['nombre']} {foto['ancho']} × {foto['alto']}")
+        return jsonify(salida="\n".join(lines))
+    if cell == "umbral":
+        pixel, threshold = data.get("pixel"), data.get("umbral")
+        if type(pixel) is not int or type(threshold) is not int or not 0 <= pixel <= 255 or not 0 <= threshold <= 255:
+            return jsonify(error="El píxel y el umbral deben ser enteros de 0 a 255."), 400
+        return jsonify(salida="El píxel es " + ("CLARO" if pixel >= threshold else "OSCURO"))
+    if cell == "matriz":
+        try:
+            image = load_demo(data.get("personaje"))
+            return jsonify(salida=f"{image.shape}\n{image.dtype}", dimensiones=list(image.shape))
+        except (ValueError, TypeError):
+            return jsonify(error="Selecciona Asta, Yuno o Noelle."), 400
+    return jsonify(error="Celda no válida."), 400
 
 if __name__ == "__main__":
     app.run(host="127.0.0.1", port=5000)
